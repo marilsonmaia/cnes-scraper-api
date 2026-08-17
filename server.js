@@ -30,40 +30,47 @@ app.post('/consultar-cnes', async (req, res) => {
       timeout: 45000 
     });
 
+    // 1. Limpa e aplica a máscara oficial no CNPJ (00.000.000/0000-00)
     const cnpjLimpo = cnpj.replace(/\D/g, '');
+    const cnpjMascara = cnpjLimpo.replace(/^(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})$/, "$1.$2.$3/$4-$5");
 
-    // Localiza o campo de busca
+    // 2. Localiza o campo de busca
     const cnpjInput = page.locator('input[placeholder*="CNPJ"], input[id*="cnpj"], input[name*="cnpj"], input[type="text"]').first();
     await cnpjInput.waitFor({ state: 'visible', timeout: 15000 });
     
-    // Interage com o campo simulando digitação humana para ativar a validação do Angular
+    // 3. Preenche com a máscara e dispara eventos nativos do Angular
     await cnpjInput.click();
-    await cnpjInput.fill('');
-    await cnpjInput.pressSequentially(cnpjLimpo, { delay: 50 });
+    await cnpjInput.fill(cnpjMascara);
     
-    // Dispara eventos de mudança e perde o foco (blur) para liberar o botão de busca
-    await cnpjInput.dispatchEvent('input');
-    await cnpjInput.dispatchEvent('change');
-    await page.keyboard.press('Tab');
-    await page.waitForTimeout(500);
+    await cnpjInput.evaluate(el => {
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      el.dispatchEvent(new Event('blur', { bubbles: true }));
+    });
 
-    // Tenta disparar a pesquisa via Enter ou clique no botão
-    const pesquisarBtn = page.locator('button.br-button.primary, button:has-text("Pesquisar"), button[type="submit"]').first();
+    await page.waitForTimeout(1000);
+
+    // 4. Executa a pesquisa forçando a remoção do 'disabled' ou via tecla Enter
+    await page.evaluate(() => {
+      const btn = document.querySelector('button.br-button.primary') || 
+                  document.querySelector('button[type="button"]') ||
+                  document.querySelector('button[type="submit"]');
+      if (btn) {
+        btn.removeAttribute('disabled');
+        btn.click();
+      }
+    });
+
+    // Garante o envio via Enter caso a ação do botão falhe
+    await cnpjInput.focus();
+    await page.keyboard.press('Enter');
     
-    if (await pesquisarBtn.isEnabled()) {
-      await pesquisarBtn.click();
-    } else {
-      // Se o botão ainda estiver desativado, força o envio pressionando Enter no campo
-      await cnpjInput.focus();
-      await page.keyboard.press('Enter');
-    }
-    
-    // Aguarda o carregamento dos resultados da pesquisa
+    // 5. Aguarda a renderização do resultado
     await page.waitForTimeout(5000);
 
     const conteudoPagina = await page.content();
     
-    // Extrai datas no formato DD/MM/AAAA encontradas no resultado
+    // Extrai datas no formato DD/MM/AAAA encontradas na página
     const regexData = /(\d{2}\/\d{2}\/\d{4})/g;
     const datasEncontradas = conteudoPagina.match(regexData) || [];
 
