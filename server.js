@@ -33,107 +33,113 @@ app.post('/consultar-cnes', async (req, res) => {
     });
 
     const page = await context.newPage();
-    const targetUrl = 'https://cnes.trabalho.gov.br/app/publico/consultas/cadastro-entidade';
-    
-    await page.goto(targetUrl, { 
-      waitUntil: 'domcontentloaded', 
-      timeout: 45000 
-    });
-
-    // 1. Formata o CNPJ com máscara (00.000.000/0000-00)
     const cnpjLimpo = cnpj.replace(/\D/g, '');
     const cnpjMascara = cnpjLimpo.replace(/^(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})$/, "$1.$2.$3/$4-$5");
 
-    // 2. Preenche o campo de CNPJ
-    const cnpjInput = page.locator('input[placeholder*="CNPJ"], input[id*="cnpj"], input[name*="cnpj"], input[type="text"]').first();
-    await cnpjInput.waitFor({ state: 'visible', timeout: 15000 });
+    // 1. TENTATIVA DIRETA: Abre direto a URL de detalhes da entidade pelo CNPJ
+    const detalhesUrl = `https://cnes.trabalho.gov.br/app/publico/consultas/cadastro-entidade/detalhes/${cnpjLimpo}`;
+    console.log(`Navegando para: ${detalhesUrl}`);
     
-    await cnpjInput.click();
-    await cnpjInput.fill(cnpjMascara);
-    
-    await cnpjInput.evaluate(el => {
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-      el.dispatchEvent(new Event('change', { bubbles: true }));
-      el.dispatchEvent(new Event('blur', { bubbles: true }));
-    });
+    await page.goto(detalhesUrl, { waitUntil: 'domcontentloaded', timeout: 35000 });
+    await page.waitForTimeout(3000);
 
-    await page.waitForTimeout(1000);
+    // Se a navegação direta redirecionar de volta para a busca, faz a busca pelo formulário
+    if (!page.url().includes('/detalhes/')) {
+      console.log("URL de detalhes redirecionou. Realizando busca via formulário...");
+      const searchUrl = 'https://cnes.trabalho.gov.br/app/publico/consultas/cadastro-entidade';
+      await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 35000 });
+      await page.waitForTimeout(2000);
 
-    // 3. Clica em Pesquisar
-    await page.evaluate(() => {
-      const btn = document.querySelector('button.br-button.primary') || 
-                  document.querySelector('button[type="submit"]') ||
-                  document.querySelector('button:not([disabled])');
-      if (btn) {
-        btn.removeAttribute('disabled');
-        btn.click();
-      }
-    });
+      const cnpjInput = page.locator('input[placeholder*="CNPJ"], input[id*="cnpj"], input[type="text"]').first();
+      await cnpjInput.waitFor({ state: 'visible', timeout: 10000 });
+      await cnpjInput.click();
+      await cnpjInput.fill(cnpjMascara);
 
-    await cnpjInput.focus();
-    await page.keyboard.press('Enter');
-    
-    // 4. Aguarda explicitamente a tabela de resultados aparecer
-    try {
-      await page.waitForSelector('table tbody tr', { timeout: 15000 });
+      await cnpjInput.evaluate(el => {
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        el.dispatchEvent(new Event('blur', { bubbles: true }));
+      });
+
       await page.waitForTimeout(1000);
-    } catch (e) {
-      console.log('Tabela de resultados não apareceu a tempo.');
-    }
 
-    // 5. Clica no item da tabela para abrir os detalhes
-    try {
-      const linha = page.locator('table tbody tr').first();
-      const acao = linha.locator('button, a, i').first();
-      
-      if (await acao.isVisible({ timeout: 3000 })) {
-        await acao.click();
-      } else if (await linha.isVisible({ timeout: 3000 })) {
-        await linha.click();
+      // Clica em Pesquisar
+      const btnPesquisar = page.locator('button:has-text("Pesquisar"), button.br-button.primary, button[type="submit"]').first();
+      if (await btnPesquisar.isVisible()) {
+        await btnPesquisar.click();
+      } else {
+        await page.keyboard.press('Enter');
       }
-      await page.waitForTimeout(3000);
-    } catch (e) {
-      console.log('Erro ao clicar no resultado da tabela:', e.message);
+
+      await page.waitForTimeout(4000);
+
+      // Clica no resultado na tabela
+      const linkTabela = page.locator('table tbody tr a, table tbody tr button, table tbody tr').first();
+      if (await linkTabela.isVisible({ timeout: 5000 })) {
+        await linkTabela.click();
+        await page.waitForTimeout(3000);
+      }
     }
 
-    // 6. Tenta clicar na aba "Dirigentes", se existir
+    // 2. Clica na aba "Dirigentes"
     try {
-      const abaDirigentes = page.locator('text=/Dirigentes/i').first();
-      if (await abaDirigentes.isVisible({ timeout: 3000 })) {
+      const abaDirigentes = page.locator('button:has-text("Dirigentes"), a:has-text("Dirigentes"), .br-tab-item:has-text("Dirigentes"), *:has-text("Dirigentes")').first();
+      if (await abaDirigentes.isVisible({ timeout: 5000 })) {
         await abaDirigentes.click();
-        await page.waitForTimeout(2000);
+        await page.waitForTimeout(2500);
       }
     } catch (e) {
-      console.log('Aba Dirigentes não encontrada ou já aberta.');
+      console.log('Aviso na aba Dirigentes:', e.message);
     }
 
-    // 7. Extrai a "Data fim" do Mandato
-    const resultadoData = await page.evaluate(() => {
+    // 3. Tenta expandir blocos sanfona/accordion se houver
+    try {
+      const accordions = await page.locator('.br-accordion button, details summary').all();
+      for (const item of accordions) {
+        if (await item.isVisible()) {
+          await item.click().catch(() => {});
+        }
+      }
+      await page.waitForTimeout(1000);
+    } catch (e) {}
+
+    // 4. Varredura profunda para extrair a "Data fim"
+    const dataFimMandato = await page.evaluate(() => {
       const texto = document.body.innerText;
 
-      // Padrão 1: Procura por "Data fim" seguido por uma data no formato DD/MM/AAAA
-      const matchDataFim = texto.match(/Data\s*fim[\s\S]*?(\d{2}\/\d{2}\/\d{4})/i);
-      if (matchDataFim && matchDataFim[1]) {
-        return matchDataFim[1];
-      }
+      // Padrão 1: "Data fim" seguido por DD/MM/AAAA
+      const m1 = texto.match(/Data\s*fim[\s\S]{0,50}?(\d{2}\/\d{2}\/\d{4})/i);
+      if (m1 && m1[1]) return m1[1];
 
-      // Padrão 2: Procura no bloco "Mandato" por duas datas (início e fim)
-      const matchMandato = texto.match(/Mandato[\s\S]*?(\d{2}\/\d{2}\/\d{4})[\s\S]*?(\d{2}\/\d{2}\/\d{4})/i);
-      if (matchMandato && matchMandato[2]) {
-        return matchMandato[2];
-      }
+      // Padrão 2: "Mandato" com data de início e data de fim
+      const m2 = texto.match(/Mandato[\s\S]{0,200}?(\d{2}\/\d{2}\/\d{4})[\s\S]{0,50}?(\d{2}\/\d{2}\/\d{4})/i);
+      if (m2 && m2[2]) return m2[2];
 
-      // Padrão 3: Procura por elementos HTML que contenham "Data fim"
-      const todosElementos = Array.from(document.querySelectorAll('*'));
-      for (const el of todosElementos) {
-        if (el.children.length === 0 && el.textContent.trim().toLowerCase() === 'data fim') {
-          const pai = el.closest('div, td, tr, section') || el.parentElement;
-          if (pai) {
+      // Padrão 3: Varredura de nós do DOM com o rótulo "Data fim"
+      const elementos = Array.from(document.querySelectorAll('*'));
+      for (const el of elementos) {
+        const txt = el.textContent ? el.textContent.trim().toLowerCase() : '';
+        if (txt === 'data fim' || txt === 'data fim:' || txt === 'fim do mandato') {
+          let pai = el.parentElement;
+          for (let i = 0; i < 3 && pai; i++) {
             const datas = pai.innerText.match(/(\d{2}\/\d{2}\/\d{4})/g);
             if (datas && datas.length > 0) {
               return datas[datas.length - 1];
             }
+            pai = pai.parentElement;
           }
+        }
+      }
+
+      // Padrão 4: Extrai datas do bloco referente a Dirigentes
+      const idxDirigentes = texto.search(/Dirigentes/i);
+      if (idxDirigentes !== -1) {
+        const bloco = texto.substring(idxDirigentes);
+        const datas = bloco.match(/(\d{2}\/\d{2}\/\d{4})/g);
+        if (datas && datas.length >= 2) {
+          return datas[1]; // Geralmente a 2ª data é a Data Fim
+        } else if (datas && datas.length === 1) {
+          return datas[0];
         }
       }
 
@@ -143,7 +149,8 @@ app.post('/consultar-cnes', async (req, res) => {
     return res.json({
       success: true,
       cnpj: cnpjLimpo,
-      dataFimMandato: resultadoData || 'Não encontrada',
+      dataFimMandato: dataFimMandato || 'Não encontrada',
+      urlAtual: page.url(),
       consultadoEm: new Date().toISOString()
     });
 
