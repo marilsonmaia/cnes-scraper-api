@@ -38,27 +38,26 @@ app.post('/consultar-cnes', async (req, res) => {
 
     const page = await context.newPage();
     const cnpjLimpo = cnpj.replace(/\D/g, '');
-    const cnpjMascara = cnpjLimpo.replace(/^(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})$/, "$1.$2.$3/$4-$5");
 
     let apiDataFim = null;
 
-    // Intercepta respostas da API interna do Angular
+    // Intercepta respostas da API interna em formato JSON
     page.on('response', async (response) => {
       try {
-        const url = response.url();
         const contentType = response.headers()['content-type'] || '';
         if (contentType.includes('application/json')) {
           const json = await response.json().catch(() => null);
           if (json) {
-            const jsonStr = JSON.stringify(json);
-            // Procura por chaves de data de fim de mandato no JSON retornado pela API
-            const m = jsonStr.match(/"(?:dataFim|dtFim|dataFimMandato|fimMandato|dataTermino)"\s*:\s*"(\d{2}\/\d{2}\/\d{4}|\d{4}-\d{2}-\d{2})"/i);
-            if (m && m[1]) {
-              if (m[1].includes('-')) {
-                const parts = m[1].split('-');
-                apiDataFim = `${parts[2]}/${parts[1]}/${parts[0]}`;
-              } else {
-                apiDataFim = m[1];
+            const str = JSON.stringify(json);
+            // Procura por chaves comuns de data fim de mandato no JSON
+            const matches = str.match(/"(?:dataFim|dtFim|dataFimMandato|fimMandato|dataTermino|dtTermino|dt_fim|data_fim)"\s*:\s*"([^"]+)"/i);
+            if (matches && matches[1]) {
+              const val = matches[1];
+              if (val.includes('-')) {
+                const parts = val.substring(0, 10).split('-');
+                if (parts.length === 3) apiDataFim = `${parts[2]}/${parts[1]}/${parts[0]}`;
+              } else if (val.match(/\d{2}\/\d{2}\/\d{4}/)) {
+                apiDataFim = val.match(/\d{2}\/\d{2}\/\d{4}/)[0];
               }
             }
           }
@@ -66,94 +65,106 @@ app.post('/consultar-cnes', async (req, res) => {
       } catch (e) {}
     });
 
-    // 1. Acessa a página oficial de pesquisa
-    const searchUrl = 'https://cnes.trabalho.gov.br/app/publico/consultas/cadastro-entidade';
-    console.log(`Acessando busca: ${searchUrl}`);
-    await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
-    await page.waitForTimeout(3000);
-
-    // 2. Preenche o CNPJ
-    console.log(`Preenchendo CNPJ: ${cnpjMascara}`);
-    const inputCnpj = page.locator('input[placeholder*="CNPJ"], input[type="text"]').first();
-    await inputCnpj.waitFor({ state: 'visible', timeout: 15000 });
-    await inputCnpj.click();
-    await inputCnpj.fill(cnpjMascara);
-    await inputCnpj.dispatchEvent('input');
-    await inputCnpj.dispatchEvent('change');
-    await page.waitForTimeout(1000);
-
-    // 3. Clica em Pesquisar
-    console.log('Clicando em Pesquisar...');
-    const btnPesquisar = page.locator('button:has-text("Pesquisar"), button.br-button.primary, button[type="submit"]').first();
-    if (await btnPesquisar.isVisible()) {
-      await btnPesquisar.click();
-    } else {
-      await page.keyboard.press('Enter');
-    }
-
+    // 1. TENTA ACESSO DIRETO À TELA DE DETALHES
+    const detalhesUrl = `https://cnes.trabalho.gov.br/app/publico/consultas/cadastro-entidade/detalhes/${cnpjLimpo}`;
+    console.log(`Navegando para detalhes: ${detalhesUrl}`);
+    await page.goto(detalhesUrl, { waitUntil: 'domcontentloaded', timeout: 35000 }).catch(() => {});
     await page.waitForTimeout(4000);
 
-    // 4. Clica na tabela de resultados para navegar até os detalhes da entidade
-    console.log('Procurando linha do resultado...');
-    const linkTabela = page.locator('table tbody tr a, table tbody tr button, table tbody tr td').first();
-    if (await linkTabela.isVisible({ timeout: 6000 })) {
-      await linkTabela.click();
-      console.log('Linha clicada! Aguardando página de detalhes...');
+    // Se tiver redirecionado para a busca, faz o fluxo de formulário desbloqueado
+    if (page.url().includes('/cadastro-entidade') && !page.url().includes('/detalhes/')) {
+      console.log('Redirecionado para busca. Preenchendo formulário...');
+      const inputCnpj = page.locator('input[placeholder*="CNPJ"], input[type="text"]').first();
+      await inputCnpj.waitFor({ state: 'visible', timeout: 10000 });
+      
+      await inputCnpj.focus();
+      await inputCnpj.fill('');
+      // Digita caractere por caractere para acionar reatividade do Angular
+      await inputCnpj.pressSequentially(cnpjLimpo, { delay: 50 });
+      await inputCnpj.evaluate(el => el.blur());
+      await page.waitForTimeout(1000);
+
+      // Remove ativamente a desabilitação do botão
+      await page.evaluate(() => {
+        const btns = document.querySelectorAll('button');
+        btns.forEach(b => {
+          if (b.textContent.includes('Pesquisar') || b.type === 'submit') {
+            b.removeAttribute('disabled');
+            b.disabled = false;
+          }
+        });
+      });
+
+      const btnPesquisar = page.locator('button:has-text("Pesquisar"), button.br-button.primary, button[type="submit"]').first();
+      await btnPesquisar.click({ force: true }).catch(async () => {
+        await page.keyboard.press('Enter');
+      });
+
       await page.waitForTimeout(4000);
-    } else {
-      console.log('Navegando via URL direta como fallback...');
-      await page.goto(`https://cnes.trabalho.gov.br/app/publico/consultas/cadastro-entidade/detalhes/${cnpjLimpo}`, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
-      await page.waitForTimeout(4000);
+
+      // Clica no resultado da tabela
+      const linkTabela = page.locator('table tbody tr a, table tbody tr button, table tbody tr td').first();
+      if (await linkTabela.isVisible({ timeout: 5000 })) {
+        await linkTabela.click();
+        await page.waitForTimeout(4000);
+      }
     }
 
-    // 5. Clica na seção / aba "Dirigentes"
+    // 2. CLICA NA ABA / SEÇÃO DIRIGENTES
     try {
-      const btnDirigentes = page.locator('text=/Dirigentes/i').last();
-      if (await btnDirigentes.isVisible({ timeout: 4000 })) {
-        await btnDirigentes.click({ force: true }).catch(() => {});
-        await page.waitForTimeout(3000);
+      const elementosClique = await page.locator('button, a, .br-tab-item, div, span').all();
+      for (const el of elementosClique) {
+        const text = await el.innerText().catch(() => '');
+        if (text && /dirigente|mandato|diretoria/i.test(text)) {
+          if (await el.isVisible().catch(() => false)) {
+            await el.click({ force: true }).catch(() => {});
+            await page.waitForTimeout(1500);
+          }
+        }
       }
     } catch (e) {}
 
-    await page.waitForTimeout(2000);
+    await page.waitForTimeout(3000);
 
-    // 6. Varredura no texto renderizado da página
-    const textoPagina = await page.evaluate(() => (document.body.innerText || '').replace(/\s+/g, ' '));
+    // 3. EXTRAÇÃO DE DATA DA PÁGINA
+    const extraidoDom = await page.evaluate(() => {
+      const texto = (document.body ? document.body.innerText : '').replace(/\s+/g, ' ');
 
-    let dataFim = apiDataFim;
+      // Padrão 1: "Data fim" seguida de data
+      const m1 = texto.match(/Data\s*fim[\s\S]{0,50}?(\d{2}\/\d{2}\/\d{4})/i);
+      if (m1 && m1[1]) return m1[1];
 
-    if (!dataFim) {
-      // Procura "Data fim" seguida de data DD/MM/AAAA
-      const m1 = textoPagina.match(/Data\s*fim[\s\S]{0,40}?(\d{2}\/\d{2}\/\d{4})/i);
-      if (m1 && m1[1]) dataFim = m1[1];
-    }
+      // Padrão 2: Mandato / Período
+      const m2 = texto.match(/Mandato[\s\S]{0,200}?(\d{2}\/\d{2}\/\d{4})[\s\S]{0,50}?(\d{2}\/\d{2}\/\d{4})/i);
+      if (m2 && m2[2]) return m2[2];
 
-    if (!dataFim) {
-      // Procura bloco de Mandato
-      const m2 = textoPagina.match(/Mandato[\s\S]{0,200}?(\d{2}\/\d{2}\/\d{4})[\s\S]{0,40}?(\d{2}\/\d{2}\/\d{4})/i);
-      if (m2 && m2[2]) dataFim = m2[2];
-    }
+      // Padrão 3: Qualquer intervalo "DD/MM/AAAA a DD/MM/AAAA"
+      const m3 = texto.match(/(\d{2}\/\d{2}\/\d{4})[\s\S]{0,30}?(?:a|até|-|à)[\s\S]{0,30}?(\d{2}\/\d{2}\/\d{4})/i);
+      if (m3 && m3[2]) return m3[2];
 
-    if (!dataFim) {
-      // Busca todas as datas na página após a palavra Dirigentes ou Mandato
-      const idxMandato = textoPagina.search(/Mandato|Dirigentes/i);
-      if (idxMandato !== -1) {
-        const trecho = textoPagina.substring(idxMandato);
-        const datas = trecho.match(/(\d{2}\/\d{2}\/\d{4})/g);
-        if (datas && datas.length >= 2) {
-          dataFim = datas[1]; // Segunda data costuma ser a Data Fim
-        } else if (datas && datas.length === 1) {
-          dataFim = datas[0];
-        }
+      // Padrão 4: Procura todas as datas na página e pega a maior (futura)
+      const todasDatas = texto.match(/(\d{2}\/\d{2}\/\d{4})/g);
+      if (todasDatas && todasDatas.length > 0) {
+        const futuras = todasDatas.filter(d => {
+          const ano = parseInt(d.split('/')[2], 10);
+          return ano >= 2024;
+        });
+        if (futuras.length > 0) return futuras[futuras.length - 1];
+        return todasDatas[todasDatas.length - 1];
       }
-    }
+
+      return null;
+    });
+
+    const dataFinal = apiDataFim || extraidoDom;
+    const textoPagina = await page.evaluate(() => (document.body ? document.body.innerText : '').substring(0, 500));
 
     return res.json({
       success: true,
       cnpj: cnpjLimpo,
-      dataFimMandato: dataFim || 'Não encontrada',
+      dataFimMandato: dataFinal || 'Não encontrada',
       urlAtual: page.url(),
-      snippetTexto: textoPagina.substring(0, 300),
+      snippetTexto: textoPagina,
       consultadoEm: new Date().toISOString()
     });
 
