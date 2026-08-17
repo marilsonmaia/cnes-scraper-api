@@ -4,7 +4,6 @@ const { chromium } = require('playwright');
 const app = express();
 app.use(express.json());
 
-// Rota raiz para teste de ping/despertar do Render
 app.get('/', (req, res) => {
   return res.status(200).json({ status: 'online', message: 'API CNES Scraper ativa' });
 });
@@ -41,15 +40,14 @@ app.post('/consultar-cnes', async (req, res) => {
       timeout: 45000 
     });
 
-    // 1. Limpa e aplica a máscara oficial no CNPJ (00.000.000/0000-00)
+    // 1. Formata o CNPJ com máscara (00.000.000/0000-00)
     const cnpjLimpo = cnpj.replace(/\D/g, '');
     const cnpjMascara = cnpjLimpo.replace(/^(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})$/, "$1.$2.$3/$4-$5");
 
-    // 2. Localiza o campo de busca
+    // 2. Preenche o campo de pesquisa
     const cnpjInput = page.locator('input[placeholder*="CNPJ"], input[id*="cnpj"], input[name*="cnpj"], input[type="text"]').first();
     await cnpjInput.waitFor({ state: 'visible', timeout: 15000 });
     
-    // 3. Preenche com a máscara e dispara eventos nativos do Angular
     await cnpjInput.click();
     await cnpjInput.fill(cnpjMascara);
     
@@ -61,7 +59,7 @@ app.post('/consultar-cnes', async (req, res) => {
 
     await page.waitForTimeout(1000);
 
-    // 4. Executa a pesquisa forçando a remoção do 'disabled' ou via tecla Enter
+    // 3. Clica em Pesquisar
     await page.evaluate(() => {
       const btn = document.querySelector('button.br-button.primary') || 
                   document.querySelector('button[type="button"]') ||
@@ -72,23 +70,52 @@ app.post('/consultar-cnes', async (req, res) => {
       }
     });
 
-    // Garante o envio via Enter caso a ação do botão falhe
     await cnpjInput.focus();
     await page.keyboard.press('Enter');
     
-    // 5. Aguarda a renderização do resultado
-    await page.waitForTimeout(5000);
+    // 4. Aguarda os resultados da busca
+    await page.waitForTimeout(4000);
 
-    const conteudoPagina = await page.content();
-    
-    // Extrai datas no formato DD/MM/AAAA encontradas na página
-    const regexData = /(\d{2}\/\d{2}\/\d{4})/g;
-    const datasEncontradas = conteudoPagina.match(regexData) || [];
+    // 5. Clica na linha da tabela ou no botão de detalhes/ações para abrir os Dirigentes
+    try {
+      const botaoAcao = page.locator('table tbody tr td button, button[title*="Detalhes"], button[title*="Visualizar"], .br-button').first();
+      if (await botaoAcao.isVisible({ timeout: 5000 })) {
+        await botaoAcao.click();
+        await page.waitForTimeout(3000);
+      }
+    } catch (e) {
+      // Caso a tela já carregue aberta
+    }
+
+    // 6. Busca específica pelo rótulo "Data fim" no DOM
+    const dataFimMandato = await page.evaluate(() => {
+      const textoPagina = document.body.innerText;
+      
+      // Procura exatamente pelo texto "Data fim" seguido da data DD/MM/AAAA
+      const matchDataFim = textoPagina.match(/Data\s*fim\s*[\r\n]*\s*(\d{2}\/\d{2}\/\d{4})/i);
+      if (matchDataFim) {
+        return matchDataFim[1];
+      }
+
+      // Procura no bloco de elementos próximos a "Mandato"
+      const elementos = Array.from(document.querySelectorAll('*'));
+      for (const el of elementos) {
+        if (el.children.length === 0 && el.textContent.trim().toLowerCase() === 'data fim') {
+          const pai = el.parentElement;
+          if (pai) {
+            const match = pai.innerText.match(/(\d{2}\/\d{2}\/\d{4})/);
+            if (match) return match[1];
+          }
+        }
+      }
+
+      return null;
+    });
 
     return res.json({
       success: true,
       cnpj: cnpjLimpo,
-      dataFimMandato: datasEncontradas[1] || datasEncontradas[0] || 'Não encontrada',
+      dataFimMandato: dataFimMandato || 'Não encontrada',
       consultadoEm: new Date().toISOString()
     });
 
