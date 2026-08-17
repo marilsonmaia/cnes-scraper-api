@@ -1,22 +1,32 @@
 const express = require('express');
-const { chromium } = require('playwright-chromium');
+const { chromium } = require('playwright');
 
 const app = express();
 app.use(express.json());
+
+// Rota raiz para teste de ping/despertar do Render (evita erro 404)
+app.get('/', (req, res) => {
+  return res.status(200).json({ status: 'online', message: 'API CNES Scraper ativa' });
+});
 
 app.post('/consultar-cnes', async (req, res) => {
   const { cnpj } = req.body;
   
   if (!cnpj) {
-    return res.status(400).json({ error: 'CNPJ obrigatorio' });
+    return res.status(400).json({ error: 'CNPJ obrigatório' });
   }
 
   let browser;
   try {
-    // Inicializa navegador em segundo plano com User-Agent real
+    // Inicializa navegador headless otimizado para o Render
     browser = await chromium.launch({ 
       headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox'] 
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--single-process'
+      ] 
     });
     
     const context = await browser.newContext({
@@ -25,42 +35,41 @@ app.post('/consultar-cnes', async (req, res) => {
 
     const page = await context.newPage();
     
-    // Acesse o portal do CNES MTE
+    // Acessa o portal CNES MTE
     await page.goto('http://cnes.mte.gov.br/paginas/consultas/consulta_entidades.xhtml', { 
-      waitUntil: 'networkidle', 
+      waitUntil: 'domcontentloaded', 
       timeout: 30000 
     });
 
-    // Preenche o CNPJ limpo (apenas numeros)
+    // Limpa o CNPJ mantendo apenas dígitos
     const cnpjLimpo = cnpj.replace(/\D/g, '');
     await page.fill('input[id*="cnpj"]', cnpjLimpo);
     
-    // Clica no botao de pesquisar
+    // Dispara a busca
     await page.click('button[id*="pesquisar"], input[type="submit"]');
     await page.waitForTimeout(3000);
 
-    // Extrai o texto do resultado (ajustar os seletores conforme a estrutura HTML atual do CNES)
     const conteudoPagina = await page.content();
     
-    // Busca por padrao de data dd/mm/aaaa no texto de vigencia
+    // Extrai datas no formato DD/MM/AAAA
     const regexData = /(\d{2}\/\d{2}\/\d{4})/g;
     const datasEncontradas = conteudoPagina.match(regexData) || [];
-
-    await browser.close();
 
     return res.json({
       success: true,
       cnpj: cnpjLimpo,
-      dataFimMandato: datasEncontradas[1] || datasEncontradas[0] || 'Nao encontrada',
+      dataFimMandato: datasEncontradas[1] || datasEncontradas[0] || 'Não encontrada',
       consultadoEm: new Date().toISOString()
     });
 
   } catch (error) {
-    if (browser) await browser.close();
     return res.status(500).json({ 
       success: false, 
       error: 'Erro ao consultar o CNES: ' + error.message 
     });
+  } finally {
+    // Garante o encerramento do processo do navegador
+    if (browser) await browser.close();
   }
 });
 
