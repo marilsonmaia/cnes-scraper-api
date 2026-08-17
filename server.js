@@ -34,112 +34,64 @@ app.post('/consultar-cnes', async (req, res) => {
 
     const page = await context.newPage();
     const cnpjLimpo = cnpj.replace(/\D/g, '');
-    const cnpjMascara = cnpjLimpo.replace(/^(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})$/, "$1.$2.$3/$4-$5");
 
-    // 1. TENTATIVA DIRETA: Abre direto a URL de detalhes da entidade pelo CNPJ
+    // 1. Navega direto para a página de detalhes da entidade
     const detalhesUrl = `https://cnes.trabalho.gov.br/app/publico/consultas/cadastro-entidade/detalhes/${cnpjLimpo}`;
     console.log(`Navegando para: ${detalhesUrl}`);
     
-    await page.goto(detalhesUrl, { waitUntil: 'domcontentloaded', timeout: 35000 });
-    await page.waitForTimeout(3000);
+    await page.goto(detalhesUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
+    
+    // Aguarda o Angular carregar as chamadas da API interna
+    await page.waitForLoadState('networkidle').catch(() => {});
+    await page.waitForTimeout(4000);
 
-    // Se a navegação direta redirecionar de volta para a busca, faz a busca pelo formulário
-    if (!page.url().includes('/detalhes/')) {
-      console.log("URL de detalhes redirecionou. Realizando busca via formulário...");
-      const searchUrl = 'https://cnes.trabalho.gov.br/app/publico/consultas/cadastro-entidade';
-      await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 35000 });
-      await page.waitForTimeout(2000);
-
-      const cnpjInput = page.locator('input[placeholder*="CNPJ"], input[id*="cnpj"], input[type="text"]').first();
-      await cnpjInput.waitFor({ state: 'visible', timeout: 10000 });
-      await cnpjInput.click();
-      await cnpjInput.fill(cnpjMascara);
-
-      await cnpjInput.evaluate(el => {
-        el.dispatchEvent(new Event('input', { bubbles: true }));
-        el.dispatchEvent(new Event('change', { bubbles: true }));
-        el.dispatchEvent(new Event('blur', { bubbles: true }));
-      });
-
-      await page.waitForTimeout(1000);
-
-      // Clica em Pesquisar
-      const btnPesquisar = page.locator('button:has-text("Pesquisar"), button.br-button.primary, button[type="submit"]').first();
-      if (await btnPesquisar.isVisible()) {
-        await btnPesquisar.click();
-      } else {
-        await page.keyboard.press('Enter');
-      }
-
-      await page.waitForTimeout(4000);
-
-      // Clica no resultado na tabela
-      const linkTabela = page.locator('table tbody tr a, table tbody tr button, table tbody tr').first();
-      if (await linkTabela.isVisible({ timeout: 5000 })) {
-        await linkTabela.click();
-        await page.waitForTimeout(3000);
-      }
-    }
-
-    // 2. Clica na aba "Dirigentes"
+    // 2. Localiza e clica na aba ou seção "Dirigentes", se não estiver expandida
     try {
-      const abaDirigentes = page.locator('button:has-text("Dirigentes"), a:has-text("Dirigentes"), .br-tab-item:has-text("Dirigentes"), *:has-text("Dirigentes")').first();
-      if (await abaDirigentes.isVisible({ timeout: 5000 })) {
-        await abaDirigentes.click();
-        await page.waitForTimeout(2500);
+      const elDirigentes = page.locator('*:has-text("Dirigentes")').last();
+      if (await elDirigentes.isVisible({ timeout: 3000 })) {
+        await elDirigentes.click({ force: true }).catch(() => {});
+        await page.waitForTimeout(2000);
       }
     } catch (e) {
-      console.log('Aviso na aba Dirigentes:', e.message);
+      console.log('Aviso ao clicar na seção Dirigentes:', e.message);
     }
 
-    // 3. Tenta expandir blocos sanfona/accordion se houver
+    // 3. Aguarda o aparecimento do texto "Mandato" ou "Data fim" na tela
     try {
-      const accordions = await page.locator('.br-accordion button, details summary').all();
-      for (const item of accordions) {
-        if (await item.isVisible()) {
-          await item.click().catch(() => {});
-        }
-      }
-      await page.waitForTimeout(1000);
-    } catch (e) {}
+      await page.waitForSelector('text=/Data fim/i', { timeout: 7000 });
+    } catch (e) {
+      console.log('Rótulo "Data fim" demorou a renderizar, prosseguindo varredura...');
+    }
 
-    // 4. Varredura profunda para extrair a "Data fim"
+    // 4. Extração minuciosa da Data Fim do Mandato
     const dataFimMandato = await page.evaluate(() => {
       const texto = document.body.innerText;
 
-      // Padrão 1: "Data fim" seguido por DD/MM/AAAA
-      const m1 = texto.match(/Data\s*fim[\s\S]{0,50}?(\d{2}\/\d{2}\/\d{4})/i);
-      if (m1 && m1[1]) return m1[1];
-
-      // Padrão 2: "Mandato" com data de início e data de fim
-      const m2 = texto.match(/Mandato[\s\S]{0,200}?(\d{2}\/\d{2}\/\d{4})[\s\S]{0,50}?(\d{2}\/\d{2}\/\d{4})/i);
-      if (m2 && m2[2]) return m2[2];
-
-      // Padrão 3: Varredura de nós do DOM com o rótulo "Data fim"
-      const elementos = Array.from(document.querySelectorAll('*'));
-      for (const el of elementos) {
-        const txt = el.textContent ? el.textContent.trim().toLowerCase() : '';
-        if (txt === 'data fim' || txt === 'data fim:' || txt === 'fim do mandato') {
-          let pai = el.parentElement;
-          for (let i = 0; i < 3 && pai; i++) {
-            const datas = pai.innerText.match(/(\d{2}\/\d{2}\/\d{4})/g);
-            if (datas && datas.length > 0) {
-              return datas[datas.length - 1];
-            }
-            pai = pai.parentElement;
-          }
-        }
+      // Padrão 1: Captura a data exatamente após "Data fim"
+      const matchDataFim = texto.match(/Data\s*fim[\s\n\r:]*(\d{2}\/\d{2}\/\d{4})/i);
+      if (matchDataFim && matchDataFim[1]) {
+        return matchDataFim[1];
       }
 
-      // Padrão 4: Extrai datas do bloco referente a Dirigentes
-      const idxDirigentes = texto.search(/Dirigentes/i);
-      if (idxDirigentes !== -1) {
-        const bloco = texto.substring(idxDirigentes);
-        const datas = bloco.match(/(\d{2}\/\d{2}\/\d{4})/g);
-        if (datas && datas.length >= 2) {
-          return datas[1]; // Geralmente a 2ª data é a Data Fim
-        } else if (datas && datas.length === 1) {
-          return datas[0];
+      // Padrão 2: Bloco "Mandato" contendo Data Início e Data Fim (retorna a 2ª data)
+      const matchMandato = texto.match(/Mandato[\s\S]*?(\d{2}\/\d{2}\/\d{4})[\s\S]*?(\d{2}\/\d{2}\/\d{4})/i);
+      if (matchMandato && matchMandato[2]) {
+        return matchMandato[2];
+      }
+
+      // Padrão 3: Varredura por nós de elementos do DOM contendo o rótulo
+      const todosElementos = Array.from(document.querySelectorAll('*'));
+      for (const el of todosElementos) {
+        const txt = el.textContent ? el.textContent.trim() : '';
+        if (/^Data\s*fim$/i.test(txt)) {
+          let container = el.parentElement;
+          for (let i = 0; i < 3 && container; i++) {
+            const datas = container.innerText.match(/(\d{2}\/\d{2}\/\d{4})/g);
+            if (datas && datas.length > 0) {
+              return datas[datas.length - 1]; // Retorna a última data do bloco
+            }
+            container = container.parentElement;
+          }
         }
       }
 
