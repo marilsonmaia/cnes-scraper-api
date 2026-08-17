@@ -1,14 +1,3 @@
-const express = require('express');
-const { chromium } = require('playwright');
-
-const app = express();
-app.use(express.json());
-
-// Rota raiz para teste de ping/despertar do Render
-app.get('/', (req, res) => {
-  return res.status(200).json({ status: 'online', message: 'API CNES Scraper ativa' });
-});
-
 app.post('/consultar-cnes', async (req, res) => {
   const { cnpj } = req.body;
   
@@ -34,28 +23,43 @@ app.post('/consultar-cnes', async (req, res) => {
     });
 
     const page = await context.newPage();
-    
-    // Nova URL oficial do Cadastro Nacional de Entidades Sindicais (CNES)
     const targetUrl = 'https://cnes.trabalho.gov.br/app/publico/consultas/cadastro-entidade';
     
     await page.goto(targetUrl, { 
-      waitUntil: 'networkidle', 
+      waitUntil: 'domcontentloaded', 
       timeout: 45000 
     });
 
     const cnpjLimpo = cnpj.replace(/\D/g, '');
 
-    // Localiza e preenche o campo de CNPJ
+    // Localiza o campo de busca
     const cnpjInput = page.locator('input[placeholder*="CNPJ"], input[id*="cnpj"], input[name*="cnpj"], input[type="text"]').first();
     await cnpjInput.waitFor({ state: 'visible', timeout: 15000 });
-    await cnpjInput.fill(cnpjLimpo);
     
-    // Localiza e clica no botão Pesquisar
-    const pesquisarBtn = page.locator('button:has-text("Pesquisar"), input[type="submit"], button[type="submit"]').first();
-    await pesquisarBtn.click();
+    // Interage com o campo simulando digitação humana para ativar a validação do Angular
+    await cnpjInput.click();
+    await cnpjInput.fill('');
+    await cnpjInput.pressSequentially(cnpjLimpo, { delay: 50 });
     
-    // Aguarda o retorno da busca
-    await page.waitForTimeout(4000);
+    // Dispara eventos de mudança e perde o foco (blur) para liberar o botão de busca
+    await cnpjInput.dispatchEvent('input');
+    await cnpjInput.dispatchEvent('change');
+    await page.keyboard.press('Tab');
+    await page.waitForTimeout(500);
+
+    // Tenta disparar a pesquisa via Enter ou clique no botão
+    const pesquisarBtn = page.locator('button.br-button.primary, button:has-text("Pesquisar"), button[type="submit"]').first();
+    
+    if (await pesquisarBtn.isEnabled()) {
+      await pesquisarBtn.click();
+    } else {
+      // Se o botão ainda estiver desativado, força o envio pressionando Enter no campo
+      await cnpjInput.focus();
+      await page.keyboard.press('Enter');
+    }
+    
+    // Aguarda o carregamento dos resultados da pesquisa
+    await page.waitForTimeout(5000);
 
     const conteudoPagina = await page.content();
     
@@ -79,6 +83,3 @@ app.post('/consultar-cnes', async (req, res) => {
     if (browser) await browser.close();
   }
 });
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`API CNES rodando na porta ${PORT}`));
