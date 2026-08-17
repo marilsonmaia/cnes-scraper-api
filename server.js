@@ -59,7 +59,7 @@ app.post('/consultar-cnes', async (req, res) => {
 
     await page.waitForTimeout(1000);
 
-    // 3. Clica no botão Pesquisar
+    // 3. Clica em Pesquisar
     await page.evaluate(() => {
       const btn = document.querySelector('button.br-button.primary') || 
                   document.querySelector('button[type="submit"]') ||
@@ -73,50 +73,63 @@ app.post('/consultar-cnes', async (req, res) => {
     await cnpjInput.focus();
     await page.keyboard.press('Enter');
     
-    // 4. Aguarda carregar a tabela de resultados da busca
-    await page.waitForTimeout(4000);
-
-    // 5. Clica no botão de ação da tabela (detalhes/visualizar entidade)
+    // 4. Aguarda explicitamente a tabela de resultados aparecer
     try {
-      const acaoTabela = page.locator('table tbody tr td button, table tbody tr td a, button[title*="Visualizar"], button[title*="Detalhes"], i.fa-eye, i.fa-search').first();
-      if (await acaoTabela.isVisible({ timeout: 5000 })) {
-        await acaoTabela.click();
-        await page.waitForTimeout(3000);
-      }
+      await page.waitForSelector('table tbody tr', { timeout: 15000 });
+      await page.waitForTimeout(1000);
     } catch (e) {
-      console.log('Aviso: Clique na tabela não necessário ou elemento não encontrado:', e.message);
+      console.log('Tabela de resultados não apareceu a tempo.');
     }
 
-    // 6. Clica na aba/seção "Dirigentes", se existir
+    // 5. Clica no item da tabela para abrir os detalhes
     try {
-      const abaDirigentes = page.locator('text=/Dirigentes/i, button:has-text("Dirigentes"), a:has-text("Dirigentes")').first();
+      const linha = page.locator('table tbody tr').first();
+      const acao = linha.locator('button, a, i').first();
+      
+      if (await acao.isVisible({ timeout: 3000 })) {
+        await acao.click();
+      } else if (await linha.isVisible({ timeout: 3000 })) {
+        await linha.click();
+      }
+      await page.waitForTimeout(3000);
+    } catch (e) {
+      console.log('Erro ao clicar no resultado da tabela:', e.message);
+    }
+
+    // 6. Tenta clicar na aba "Dirigentes", se existir
+    try {
+      const abaDirigentes = page.locator('text=/Dirigentes/i').first();
       if (await abaDirigentes.isVisible({ timeout: 3000 })) {
         await abaDirigentes.click();
         await page.waitForTimeout(2000);
       }
     } catch (e) {
-      console.log('Aviso: Aba Dirigentes já visível ou não encontrada:', e.message);
+      console.log('Aba Dirigentes não encontrada ou já aberta.');
     }
 
-    // 7. Extração precisa do campo "Data fim" no painel de Mandato
-    const dataFimMandato = await page.evaluate(() => {
+    // 7. Extrai a "Data fim" do Mandato
+    const resultadoData = await page.evaluate(() => {
       const texto = document.body.innerText;
 
-      // Padrão 1: "Data fim" seguido da data DD/MM/AAAA
-      const m1 = texto.match(/Data\s*fim[\s\S]{1,40}?(\d{2}\/\d{2}\/\d{4})/i);
-      if (m1 && m1[1]) return m1[1];
+      // Padrão 1: Procura por "Data fim" seguido por uma data no formato DD/MM/AAAA
+      const matchDataFim = texto.match(/Data\s*fim[\s\S]*?(\d{2}\/\d{2}\/\d{4})/i);
+      if (matchDataFim && matchDataFim[1]) {
+        return matchDataFim[1];
+      }
 
-      // Padrão 2: Seção "Mandato" contendo data de início e data de fim
-      const secaoMandato = texto.match(/Mandato[\s\S]{1,200}?(\d{2}\/\d{2}\/\d{4})[\s\S]{1,50}?(\d{2}\/\d{2}\/\d{4})/i);
-      if (secaoMandato && secaoMandato[2]) return secaoMandato[2];
+      // Padrão 2: Procura no bloco "Mandato" por duas datas (início e fim)
+      const matchMandato = texto.match(/Mandato[\s\S]*?(\d{2}\/\d{2}\/\d{4})[\s\S]*?(\d{2}\/\d{2}\/\d{4})/i);
+      if (matchMandato && matchMandato[2]) {
+        return matchMandato[2];
+      }
 
-      // Padrão 3: Procura no contêiner do DOM rotulado como "Data fim"
-      const elementos = Array.from(document.querySelectorAll('*'));
-      for (const el of elementos) {
+      // Padrão 3: Procura por elementos HTML que contenham "Data fim"
+      const todosElementos = Array.from(document.querySelectorAll('*'));
+      for (const el of todosElementos) {
         if (el.children.length === 0 && el.textContent.trim().toLowerCase() === 'data fim') {
-          const container = el.closest('div, td, tr, section') || el.parentElement;
-          if (container) {
-            const datas = container.innerText.match(/(\d{2}\/\d{2}\/\d{4})/g);
+          const pai = el.closest('div, td, tr, section') || el.parentElement;
+          if (pai) {
+            const datas = pai.innerText.match(/(\d{2}\/\d{2}\/\d{4})/g);
             if (datas && datas.length > 0) {
               return datas[datas.length - 1];
             }
@@ -130,7 +143,7 @@ app.post('/consultar-cnes', async (req, res) => {
     return res.json({
       success: true,
       cnpj: cnpjLimpo,
-      dataFimMandato: dataFimMandato || 'Não encontrada',
+      dataFimMandato: resultadoData || 'Não encontrada',
       consultadoEm: new Date().toISOString()
     });
 
