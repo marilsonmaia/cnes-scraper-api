@@ -4,7 +4,7 @@ const { chromium } = require('playwright');
 const app = express();
 app.use(express.json());
 
-// Rota raiz para teste de ping/despertar do Render (evita erro 404)
+// Rota raiz para teste de ping/despertar do Render
 app.get('/', (req, res) => {
   return res.status(200).json({ status: 'online', message: 'API CNES Scraper ativa' });
 });
@@ -18,7 +18,6 @@ app.post('/consultar-cnes', async (req, res) => {
 
   let browser;
   try {
-    // Inicializa navegador headless otimizado para o Render
     browser = await chromium.launch({ 
       headless: true,
       args: [
@@ -30,28 +29,37 @@ app.post('/consultar-cnes', async (req, res) => {
     });
     
     const context = await browser.newContext({
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      viewport: { width: 1280, height: 800 }
     });
 
     const page = await context.newPage();
     
-    // Acessa o portal CNES MTE
-    await page.goto('http://cnes.mte.gov.br/paginas/consultas/consulta_entidades.xhtml', { 
-      waitUntil: 'domcontentloaded', 
-      timeout: 30000 
+    // Nova URL oficial do Cadastro Nacional de Entidades Sindicais (CNES)
+    const targetUrl = 'https://cnes.trabalho.gov.br/app/publico/consultas/cadastro-entidade';
+    
+    await page.goto(targetUrl, { 
+      waitUntil: 'networkidle', 
+      timeout: 45000 
     });
 
-    // Limpa o CNPJ mantendo apenas dígitos
     const cnpjLimpo = cnpj.replace(/\D/g, '');
-    await page.fill('input[id*="cnpj"]', cnpjLimpo);
+
+    // Localiza e preenche o campo de CNPJ
+    const cnpjInput = page.locator('input[placeholder*="CNPJ"], input[id*="cnpj"], input[name*="cnpj"], input[type="text"]').first();
+    await cnpjInput.waitFor({ state: 'visible', timeout: 15000 });
+    await cnpjInput.fill(cnpjLimpo);
     
-    // Dispara a busca
-    await page.click('button[id*="pesquisar"], input[type="submit"]');
-    await page.waitForTimeout(3000);
+    // Localiza e clica no botão Pesquisar
+    const pesquisarBtn = page.locator('button:has-text("Pesquisar"), input[type="submit"], button[type="submit"]').first();
+    await pesquisarBtn.click();
+    
+    // Aguarda o retorno da busca
+    await page.waitForTimeout(4000);
 
     const conteudoPagina = await page.content();
     
-    // Extrai datas no formato DD/MM/AAAA
+    // Extrai datas no formato DD/MM/AAAA encontradas no resultado
     const regexData = /(\d{2}\/\d{2}\/\d{4})/g;
     const datasEncontradas = conteudoPagina.match(regexData) || [];
 
@@ -68,7 +76,6 @@ app.post('/consultar-cnes', async (req, res) => {
       error: 'Erro ao consultar o CNES: ' + error.message 
     });
   } finally {
-    // Garante o encerramento do processo do navegador
     if (browser) await browser.close();
   }
 });
