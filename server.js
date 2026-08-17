@@ -1,3 +1,14 @@
+const express = require('express');
+const { chromium } = require('playwright');
+
+const app = express();
+app.use(express.json());
+
+// Rota raiz para teste de ping/despertar do Render
+app.get('/', (req, res) => {
+  return res.status(200).json({ status: 'online', message: 'API CNES Scraper ativa' });
+});
+
 app.post('/consultar-cnes', async (req, res) => {
   const { cnpj } = req.body;
   
@@ -89,4 +100,9 @@ app.post('/consultar-cnes', async (req, res) => {
   } finally {
     if (browser) await browser.close();
   }
+});
+
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`API CNES rodando na porta ${PORT}`);
 });
