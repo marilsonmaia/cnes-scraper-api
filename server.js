@@ -1,55 +1,81 @@
 const express = require('express');
-const { chromium } = require('playwright');
+const axios = require('axios');
 
 const app = express();
 app.use(express.json());
 
+app.get('/', (req, res) => {
+  return res.json({ status: 'online', message: 'API CNES ativa' });
+});
+
 app.get('/consultar-cnes', async (req, res) => {
-  let browser;
+  const rawCnpj = req.query.cnpj;
+  if (!rawCnpj) {
+    return res.status(400).json({ status: 'erro', mensagem: 'CNPJ é obrigatório' });
+  }
+
+  const cnpj = String(rawCnpj).replace(/\D/g, '');
+  if (cnpj.length !== 14) {
+    return res.status(400).json({ status: 'erro', mensagem: 'CNPJ deve conter 14 dígitos' });
+  }
+
   try {
-    browser = await chromium.launch({
-      headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+    // 1. Consulta direta ao endpoint público do CNES/MTE
+    const apiGovUrl = `https://cnes.trabalho.gov.br/cnes-backend/api/publico/entidades/pesquisar?cnpj=${cnpj}`;
+
+    const response = await axios.get(apiGovUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'Accept': 'application/json, text/plain, */*',
+        'Referer': 'https://cnes.trabalho.gov.br/app/publico/consultas/cadastro-entidade',
+        'Origin': 'https://cnes.trabalho.gov.br'
+      },
+      timeout: 15000
     });
 
-    const page = await browser.newPage();
-    const requisicoesRede = [];
+    const data = response.data;
 
-    // Captura todas as APIs que o site do governo tenta chamar
-    page.on('response', response => {
-      if (response.url().includes('cnes') || response.url().includes('api')) {
-        requisicoesRede.push(`${response.status()} : ${response.url()}`);
+    // Converte o retorno em texto JSON para localizar campos de data
+    const jsonStr = JSON.stringify(data);
+
+    if (!data || jsonStr === '[]' || jsonStr === '{}') {
+      return res.json({ status: 'nao_encontrado', mensagem: 'CNPJ não encontrado no CNES' });
+    }
+
+    // Busca chaves comuns de data de término/mandato no JSON retornado
+    let dataTermino = null;
+    const matchTermino = jsonStr.match(/"(?:dataFimMandato|dtFimMandato|dataFim|dtFim|dataTermino)"\s*:\s*"([^"]+)"/i);
+    
+    if (matchTermino && matchTermino[1]) {
+      dataTermino = matchTermino[1];
+    } else {
+      // Captura a última data no formato DD/MM/AAAA ou AAAA-MM-DD
+      const datas = jsonStr.match(/\d{2}\/\d{2}\/\d{4}|\d{4}-\d{2}-\d{2}/g) || [];
+      if (datas.length > 0) {
+        dataTermino = datas[datas.length - 1];
       }
-    });
-
-    // Tenta acessar a página do CNES
-    await page.goto('https://cnes.trabalho.gov.br/app/publico/consultas/cadastro-entidade', {
-      waitUntil: 'domcontentloaded',
-      timeout: 30000
-    });
-
-    // Aguarda 5 segundos para carga de scripts
-    await page.waitForTimeout(5000);
-
-    const titulo = await page.title();
-    const textoVisivel = await page.evaluate(() => document.body ? document.body.innerText : 'SEM CONTEUDO');
-    const totalInputs = await page.locator('input').count();
+    }
 
     return res.json({
-      status: 'diagnostico_concluido',
-      tituloPagina: titulo,
-      inputsEncontrados: totalInputs,
-      requisicoesInternas: requisicoesRede,
-      textoCapturado: textoVisivel.substring(0, 400).replace(/\s+/g, ' '),
-      possivelBloqueio: textoVisivel.includes('Cloudflare') || textoVisivel.includes('Access Denied') || textoVisivel.includes('Captcha')
+      status: 'sucesso',
+      cnpj: cnpj,
+      dataTerminoMandato: dataTermino || 'Não informada',
+      dadosCompletos: data
     });
 
-  } catch (err) {
-    return res.status(500).json({ error: err.message });
-  } finally {
-    if (browser) await browser.close();
+  } catch (error) {
+    // Se o backend do MTE responder 404
+    if (error.response && error.response.status === 404) {
+      return res.json({ status: 'nao_encontrado', mensagem: 'Entidade não cadastrada' });
+    }
+
+    return res.status(500).json({
+      status: 'erro',
+      mensagem: error.message,
+      detalhe: error.response ? error.response.data : null
+    });
   }
 });
 
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, '0.0.0.0', () => console.log(`Diagnóstico ativo na porta ${PORT}`));
+app.listen(PORT, '0.0.0.0', () => console.log(`Servidor ativo na porta ${PORT}`));
